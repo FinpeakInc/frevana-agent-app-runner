@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import manual_app_token as runner
-from frevana_runner.auth import ApiError, ORIGINS, RunnerError
+
+from frevana_runner.auth import ORIGINS, ApiError, RunnerError
 
 
 class SharePromptTests(unittest.TestCase):
@@ -25,7 +26,7 @@ class SharePromptTests(unittest.TestCase):
         def descriptor(url, *, method, headers, bearer):
             self.assertEqual((method, headers, bearer), ("POST", {"x-policy-version": "2"}, "tester"))
             share = url.split("/")[-2]
-            return {"agent_app_id": share, "snapshot_id": "v1", "sha256": "sample"}
+            return {"share_id": share, "agent_app_id": share, "snapshot_id": "v1", "sha256": "sample"}
 
         def download(desc, path):
             job = jobs[desc["agent_app_id"]]

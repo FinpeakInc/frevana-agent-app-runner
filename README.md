@@ -1,25 +1,34 @@
 # Frevana Agent App Runner
 
-Paste the following into Codex or Claude Code and replace `<AGENT_APP_URL>` with a Frevana Agent App share link. Append a task or input if you already know what you want the App to do.
+Paste the following into Codex or Claude Code and replace `<AGENT_APP_URL>` with a Frevana Agent App share link. Append a task or input if you already know what you want the App to do. Otherwise, the agent first reads the App's tasks and suggests what you can do.
 
 ```text
-Run this Frevana Agent App in our current conversation using App-token test mode.
+Help me use this Agent App:
 <AGENT_APP_URL>
 
-Resolve main at https://github.com/FinpeakInc/frevana-agent-app-runner once. Read SKILL.md and use the test runner from that same commit.
-Prepare the share and read the package's job.json and referenced skills. Choose the job for my request. Ask for any missing inputs or job choice, and explain Frevana credit usage before starting a paid job. Execute the job and return its result and local output path.
+Follow SKILL.md at https://github.com/FinpeakInc/frevana-agent-app-runner.
 ```
 
-## Set up the test account
+## Browser authorization
 
-From the Runner checkout, use Python 3.10 or later and enter your App access token at the hidden terminal prompt.
+Use Python 3.10+ and install the checkout in a virtual environment:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install .
-.venv/bin/python tests/manual_app_token.py login
+.venv/bin/frevana-runner prepare "https://dev-www.frevana.com/agentapp/s/<share_code>/preview"
 ```
 
-For development shares, run `.venv/bin/python tests/manual_app_token.py --environment development login` with a development token. Setup is shared across App URLs in that environment. Run `login` again when the token expires. Use `logout` with the same environment to clear the test credential from the system credential store.
+The share URL selects dev or production automatically; an explicit `--environment` must match it. On first use, open the printed authorization URL in a browser on this computer, sign in and choose Allow. The Runner receives the callback, stores credentials in the system credential store and renews them automatically. Preparing only downloads the package; follow [SKILL.md](SKILL.md) to select and execute a job.
 
-The standard browser-authorized flow is in [SKILL.md](SKILL.md). The test flow uses the tester's existing Frevana account and credits.
+Complete the browser authorization within 10 minutes. If the page says authorization could not be completed, run `prepare` again to open a fresh link; refreshing an expired page does not restart authorization.
+
+Each environment has its own registration, credentials and cached results. Existing legacy Runner credentials are not imported. Copies from the same grant reuse saved results; a new grant starts a separate cache without deleting old files.
+
+`frevana-runner logout` clears local production credentials. For dev use `frevana-runner --environment development logout`. To revoke the server authorization too, open the Authorized apps URL printed by logout and locate its grant ID.
+
+## Deployment prerequisites
+
+Enable the `agent_app_external_run` scenario and assign `POST /agent-app-shares/:share_code/download` through the existing OAuth scenario admin page, along with the business operations required by the package. The Runner checks the public resource metadata before asking the user to authorize. Newly assigned operations require new consent. Publish this Runner version before enabling `NEXT_PUBLIC_AGENT_APP_RUNNER_ENABLED=true` in the Web build, independently for each environment.
+
+Publish the updated `SKILL.md` task guidance before releasing the simplified Web copy prompt.

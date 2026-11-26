@@ -61,9 +61,9 @@ def body_chunks(handler, length, chunked):
 
 
 @contextlib.contextmanager
-def forwarding(credentials, user, initial_token, *, allow_request=None):
+def forwarding(credentials, grant, initial_token, *, allow_request=None):
     prefix = "/" + secrets.token_urlsafe(32)
-    upstream = urlsplit(credentials.api)
+    upstream = urlsplit(credentials.business_api)
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60
@@ -91,7 +91,7 @@ def forwarding(credentials, user, initial_token, *, allow_request=None):
                 self.send_error(403, "Endpoint outside the Runner test scope")
                 return
             try:
-                token = credentials.token(expected_user=user)["access_token"]
+                token = credentials.token(expected_grant=grant)["access_token"]
             except (ApiError, OSError, KeyringError):
                 self.send_error(503, "Runner could not refresh the credential")
                 return
@@ -135,7 +135,7 @@ def forwarding(credentials, user, initial_token, *, allow_request=None):
                 )
                 conn.request(
                     self.command,
-                    target,
+                    upstream.path.rstrip("/") + target,
                     body=body,
                     headers=headers,
                     encode_chunked=bool(encoding),

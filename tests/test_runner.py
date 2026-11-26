@@ -38,6 +38,15 @@ class RuntimeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.now = 60
+        preflight = patch("frevana_runner.auth.check_resource")
+        preflight.start()
+        self.addCleanup(preflight.stop)
+        discovery = patch(
+            "frevana_runner.auth.discover",
+            return_value={"token_endpoint": "https://api.frevana.com/oauth/token"},
+        )
+        discovery.start()
+        self.addCleanup(discovery.stop)
         self.backend = MemoryKeyring()
         self.creds = Credentials(
             root=self.tmp.name, backend=self.backend, clock=lambda: self.now
@@ -47,8 +56,10 @@ class RuntimeTests(unittest.TestCase):
                 "access_token": "first",
                 "refresh_token": "secret-renew",
                 "expires_in": 900,
+                "grant_id": "grant-a",
+                "token_type": "Bearer",
             },
-            "user-a",
+            "grant-a",
         )
 
     def test_single_long_child_queries_at_minute_18_without_repeating_submission(self):
@@ -90,12 +101,14 @@ class RuntimeTests(unittest.TestCase):
                     "access_token": "second",
                     "refresh_token": "second-renew",
                     "expires_in": 900,
+                    "grant_id": "grant-a",
+                    "token_type": "Bearer",
                 }
                 with (
                     patch(
                         "frevana_runner.auth.request_json", return_value=fresh
                     ) as exchange,
-                    forwarding(self.creds, "user-a", "first") as base,
+                    forwarding(self.creds, "grant-a", "first") as base,
                 ):
                     code = """import os,urllib.request as u
 base=os.environ['FREVANA_API_BASE_URL']
@@ -117,8 +130,14 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
                 self.assertEqual(
                     events,
                     [
-                        ("POST", "/submit", "Bearer first", "unique", b"payload"),
-                        ("GET", "/jobs/job1", "Bearer second"),
+                        (
+                            "POST",
+                            "/agent-app-external-run/submit",
+                            "Bearer first",
+                            "unique",
+                            b"payload",
+                        ),
+                        ("GET", "/agent-app-external-run/jobs/job1", "Bearer second"),
                     ],
                 )
             finally:
@@ -149,7 +168,7 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
             thread.start()
             try:
                 self.creds.api = f"http://127.0.0.1:{upstream.server_port}"
-                with forwarding(self.creds, "user-a", "first") as base:
+                with forwarding(self.creds, "grant-a", "first") as base:
                     headers = {"Authorization": "Bearer first"}
                     submit = urllib.request.Request(
                         base + "/submit", data=b"work", headers=headers
@@ -162,7 +181,13 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
                     )
                     with urllib.request.urlopen(query) as response:
                         self.assertEqual(response.read(), b"complete")
-                self.assertEqual(events, ["/submit", "/jobs/saved"])
+                self.assertEqual(
+                    events,
+                    [
+                        "/agent-app-external-run/submit",
+                        "/agent-app-external-run/jobs/saved",
+                    ],
+                )
             finally:
                 upstream.shutdown()
                 thread.join()
@@ -175,6 +200,8 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
                 "access_token": "new",
                 "refresh_token": "next",
                 "expires_in": 900,
+                "grant_id": "grant-a",
+                "token_type": "Bearer",
             },
         ) as exchange:
             with ThreadPoolExecutor(max_workers=4) as pool:
@@ -190,10 +217,15 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
                 )
             exchange.assert_called_once()
             with self.assertRaises(RunnerError):
-                self.creds.token(expected_user="other")
+                self.creds.token(expected_grant="other")
 
     def test_share_policy_rechecked_and_ref_removed_after_revocation(self):
-        desc = {"agent_app_id": "test-app", "snapshot_id": "s1", "sha256": "ab"}
+        desc = {
+            "share_id": "share-id",
+            "agent_app_id": "test-app",
+            "snapshot_id": "s1",
+            "sha256": "ab",
+        }
         reqs = []
 
         def descriptor(*args, **kwargs):
@@ -220,10 +252,15 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
                 prepare(self.creds, "share")
             dl.assert_called_once()
         self.assertTrue(all(r["headers"] == {"x-policy-version": "2"} for r in reqs))
-        self.assertFalse(list(self.creds.root.glob("accounts/*/shares/share.json")))
+        self.assertFalse(list(self.creds.root.glob("grants/*/shares/share.json")))
 
     def test_expired_signed_url_renews_descriptor_once(self):
-        desc = {"agent_app_id": "a", "snapshot_id": "1", "sha256": "a"}
+        desc = {
+            "share_id": "share-id",
+            "agent_app_id": "a",
+            "snapshot_id": "1",
+            "sha256": "a",
+        }
 
         def expired(*args):
             raise urllib.error.HTTPError(
@@ -240,6 +277,7 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
 
     def test_checksum_mismatch_never_installs(self):
         desc = {
+            "share_id": "share-id",
             "agent_app_id": "a",
             "snapshot_id": "1",
             "sha256": "bad",
@@ -251,7 +289,7 @@ assert u.urlopen(u.Request(base+'/jobs/job1',headers=headers)).read()==b'data: c
             self.assertRaisesRegex(RunnerError, "SHA-256"),
         ):
             prepare(self.creds, "test")
-        self.assertFalse(list(self.creds.root.glob("accounts/*/shares/test.json")))
+        self.assertFalse(list(self.creds.root.glob("grants/*/shares/test.json")))
 
     def test_archive_rejects_traversal_and_symlinks(self):
         for filename, mode in [

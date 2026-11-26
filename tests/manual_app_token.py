@@ -15,9 +15,13 @@ from keyring.errors import KeyringError
 
 from frevana_runner import cli
 from frevana_runner.auth import (
-    ORIGINS, ApiError, RunnerError, request_json, system_keyring,
+    ORIGINS,
+    ApiError,
+    RunnerError,
+    request_json,
+    system_keyring,
 )
-from frevana_runner.packs import share_code
+from frevana_runner.packs import share_environment
 from frevana_runner.relay import forwarding
 
 TEST_SERVICE = "frevana-agent-app-runner.app-token-test"
@@ -57,10 +61,14 @@ class TestSession:
     user: str
     access_token: str = field(repr=False)
 
-    def token(self, *, login=False, expected_user=None):
-        if expected_user is not None and expected_user != self.user:
+    @property
+    def business_api(self):
+        return self.api
+
+    def token(self, *, login=False, expected_grant=None):
+        if expected_grant is not None and expected_grant != self.user:
             raise RunnerError("Runner account changed. Prepare the App again.")
-        return {"user": self.user, "access_token": self.access_token}
+        return {"grant_id": self.user, "access_token": self.access_token}
 
 
 def read_access_token(api):
@@ -136,10 +144,7 @@ def main(argv=None):
     ):
         parser.error("Expected prepare, exec or result followed by a share URL")
     share = args.action if one_off else args.arguments[0]
-    environment = args.environment or (
-        "development" if urlsplit(share).hostname == "dev-www.frevana.com" else "production"
-    )
-    share_code(share, environment)
+    environment = share_environment(share, args.environment)
     api = ORIGINS[environment]
     if not one_off:
         token = system_keyring().get_password(TEST_SERVICE, api)
@@ -162,9 +167,11 @@ def main(argv=None):
             sys.executable,
             "-I",
             "-c",
-            "import json\nfrom pathlib import Path\n"
-            "json.loads(Path('skillpack.json').read_text(encoding='utf-8-sig'))\n"
-            "print('Runner exec OK')",
+            (
+                "import json\nfrom pathlib import Path\n"
+                "json.loads(Path('skillpack.json').read_text(encoding='utf-8-sig'))\n"
+                "print('Runner exec OK')"
+            ),
         ]
     return run_cli(environment, session, "exec", [share, "--", *command])
 

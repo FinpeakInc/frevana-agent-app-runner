@@ -9,13 +9,15 @@ from pathlib import Path
 from keyring.errors import KeyringError
 
 from .auth import ORIGINS, Credentials, RunnerError
-from .packs import key, prepare, prepared, share_code, write_json
+from .packs import key, prepare, prepared, share_code, share_environment, write_json
 from .relay import forwarding
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="frevana-runner")
-    parser.add_argument("--environment", choices=ORIGINS, default="production")
+    parser.add_argument(
+        "--environment", choices=ORIGINS, help="Defaults to the share URL's environment"
+    )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("prepare").add_argument("share")
     run = sub.add_parser("exec")
@@ -28,16 +30,18 @@ def main(argv=None):
     sub.add_parser("logout")
     args = parser.parse_args(argv)
     try:
-        credentials = Credentials(args.environment)
         if args.action == "logout":
-            credentials.logout()
+            credentials = Credentials(args.environment or "production")
+            print(json.dumps(credentials.logout()))
             return 0
-        code = share_code(args.share, args.environment)
+        environment = share_environment(args.share, args.environment)
+        code = share_code(args.share, environment)
+        credentials = Credentials(environment)
         if args.action == "prepare":
             print(json.dumps(prepare(credentials, code), ensure_ascii=False))
             return 0
         session = credentials.token()
-        app = prepared(credentials, code, session["user"])
+        app = prepared(credentials, code, session["grant_id"])
         if args.action == "result":
             if not any(job["id"] == args.job_id for job in app["jobs"]):
                 raise RunnerError("Unknown job in this snapshot.")
@@ -51,7 +55,9 @@ def main(argv=None):
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         if not command:
             parser.error("exec needs a command after --")
-        with forwarding(credentials, session["user"], session["access_token"]) as base:
+        with forwarding(
+            credentials, session["grant_id"], session["access_token"]
+        ) as base:
             env = dict(
                 os.environ,
                 PACK_ROOT=app["pack_root"],

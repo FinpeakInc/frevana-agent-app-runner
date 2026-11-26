@@ -40,6 +40,20 @@ def share_code(url, environment):
     return found[1]
 
 
+def share_environment(url, explicit=None):
+    environment = (
+        "development"
+        if urllib.parse.urlsplit(url).hostname == "dev-www.frevana.com"
+        else "production"
+    )
+    share_code(url, environment)
+    if explicit is not None and explicit != environment:
+        raise RunnerError(
+            f"This share uses {environment}; --environment {explicit} does not match."
+        )
+    return environment
+
+
 def key(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -145,20 +159,20 @@ def app_jobs(root):
 
 
 def prepare(creds, code):
-    account = creds.token(login=True)["user"]
-    home = creds.root / "accounts" / key(account)
+    grant = creds.token(login=True)["grant_id"]
+    home = creds.root / "grants" / key(grant)
 
     def descriptor():
         return request_json(
-            creds.api + "/agent-app-shares/" + code + "/download",
+            creds.business_api + "/agent-app-shares/" + code + "/download",
             method="POST",
             headers={"x-policy-version": "2"},
-            bearer=creds.token(expected_user=account)["access_token"],
+            bearer=creds.token(expected_grant=grant)["access_token"],
         )
 
     ref = home / "shares" / (code + ".json")
     with FileLock(
-        str(creds.root / ("prepare-" + key(account + code) + ".lock")), timeout=360
+        str(creds.root / ("prepare-" + key(grant + code) + ".lock")), timeout=360
     ):
         ref.unlink(missing_ok=True)
         for attempt in range(2):
@@ -193,6 +207,7 @@ def prepare(creds, code):
                 "data_root": str(app),
                 "agent_app_id": desc["agent_app_id"],
                 "snapshot_id": desc["snapshot_id"],
+                "share_id": desc["share_id"],
                 "jobs": app_jobs(dest),
             }
             write_json(ref, info)
@@ -200,8 +215,8 @@ def prepare(creds, code):
     raise RunnerError("Package URL expired.")
 
 
-def prepared(creds, code, user):
-    path = creds.root / "accounts" / key(user) / "shares" / (code + ".json")
+def prepared(creds, code, grant):
+    path = creds.root / "grants" / key(grant) / "shares" / (code + ".json")
     if not path.exists():
-        raise RunnerError("Prepare this share for the current account first.")
+        raise RunnerError("Prepare this share for the current authorization first.")
     return json.loads(path.read_text(encoding="utf8"))
