@@ -19,7 +19,6 @@ from unittest.mock import patch
 
 from frevana_runner import cli
 from frevana_runner.auth import (
-    DOWNLOAD_SCOPE,
     RESOURCE_PATH,
     VAULT,
     ApiError,
@@ -29,7 +28,7 @@ from frevana_runner.auth import (
     check_resource,
     discover,
 )
-from frevana_runner.packs import share_environment
+from frevana_runner.packs import prepare, share_environment
 
 
 class Vault:
@@ -54,7 +53,10 @@ class OAuthFixture:
         self.serial = 0
         self.denied = False
         self.revoked = False
-        self.scopes = [DOWNLOAD_SCOPE]
+        self.scopes_supported = ["agent_app_external_run"]
+        self.token_scope = "agent_app_external_run"
+        self.omit_token_scope = False
+        self.download_allowed = True
         self.browser_errors = []
         self.callback_statuses = []
         self.callback_attacks = False
@@ -88,7 +90,7 @@ class OAuthFixture:
                         {
                             "resource": fixture.api + RESOURCE_PATH,
                             "authorization_servers": [fixture.api],
-                            "scopes_supported": fixture.scopes,
+                            "scopes_supported": fixture.scopes_supported,
                         }
                     )
                 elif parsed.path == "/oauth/authorize":
@@ -188,16 +190,16 @@ class OAuthFixture:
                 refresh = "refresh-" + str(fixture.serial)
                 fixture.refreshes[refresh] = (data["client_id"], grant)
                 fixture.access_tokens.add("Bearer access-" + str(fixture.serial))
-                self.reply(
-                    {
-                        "access_token": "access-" + str(fixture.serial),
-                        "refresh_token": refresh,
-                        "grant_id": grant,
-                        "expires_in": 900,
-                        "token_type": "Bearer",
-                        "scope": " ".join(fixture.scopes),
-                    }
-                )
+                pair = {
+                    "access_token": "access-" + str(fixture.serial),
+                    "refresh_token": refresh,
+                    "grant_id": grant,
+                    "expires_in": 900,
+                    "token_type": "Bearer",
+                }
+                if not fixture.omit_token_scope:
+                    pair["scope"] = fixture.token_scope
+                self.reply(pair)
 
             def resource_request(self, method, body):
                 if not self.path.startswith(RESOURCE_PATH + "/"):
@@ -207,14 +209,27 @@ class OAuthFixture:
                     or self.headers.get("Authorization") not in fixture.access_tokens
                 ):
                     self.reply({"error": "unauthorized"}, 401)
-                elif fixture.resource_handler:
-                    fixture.requests.append((method, self.path, body))
-                    result = fixture.resource_handler(
-                        method, self.path, body, self.headers
-                    )
-                    self.reply(result)
                 else:
-                    self.reply({"error": "not_found"}, 404)
+                    fixture.requests.append((method, self.path, body))
+                    if (
+                        not fixture.download_allowed
+                        and method == "POST"
+                        and self.path.startswith(RESOURCE_PATH + "/agent-app-shares/")
+                        and self.path.endswith("/download")
+                    ):
+                        self.send_response(403)
+                        self.send_header(
+                            "WWW-Authenticate", 'Bearer error="insufficient_scope"'
+                        )
+                        self.end_headers()
+                        self.wfile.write(b"Forbidden")
+                    elif fixture.resource_handler:
+                        result = fixture.resource_handler(
+                            method, self.path, body, self.headers
+                        )
+                        self.reply(result)
+                    else:
+                        self.reply({"error": "not_found"}, 404)
                 return True
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -335,6 +350,87 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(self.fixture.callback_statuses, [400] * 5)
         self.assertFalse(self.fixture.browser_errors)
 
+    def test_legacy_scopes_reuse_and_migrate_without_new_authorization(self):
+        for route in (
+            b"POST /agent-app-shares/:share_code/download",
+            b"GET /user-pins",
+        ):
+            with self.subTest(route=route):
+                self.creds.logout()
+                self.fixture.token_scope = "api." + hashlib.sha256(route).hexdigest()
+                first = self.creds.token(login=True)
+                visits = sum(r[1] == "/oauth/authorize" for r in self.fixture.requests)
+                self.fixture.token_scope = "agent_app_external_run"
+                self.assertEqual(self.creds.token(login=True), first)
+                self.now += 900
+                renewed = self.creds.token(login=True)
+                self.assertEqual(renewed["grant_id"], first["grant_id"])
+                self.assertEqual(renewed["scope"], "agent_app_external_run")
+                self.assertEqual(self.creds.token(login=True), renewed)
+                self.assertEqual(
+                    sum(r[1] == "/oauth/authorize" for r in self.fixture.requests),
+                    visits,
+                )
+
+    def test_omitted_scope_defaults_to_scenario_and_refresh_preserves_previous(self):
+        self.fixture.omit_token_scope = True
+        first = self.creds.token(login=True)
+        self.assertEqual(first["scope"], "agent_app_external_run")
+        self.assertEqual(self.creds.token(login=True), first)
+        self.now += 900
+        renewed = self.creds.token(login=True)
+        self.assertEqual(renewed["scope"], first["scope"])
+        self.assertEqual(renewed["grant_id"], first["grant_id"])
+        explicit = "agent_app_external_run additional_scope"
+        self.fixture.omit_token_scope = False
+        self.fixture.token_scope = explicit
+        self.now += 900
+        renewed = self.creds.token(login=True)
+        self.assertEqual(renewed["scope"], explicit)
+        self.fixture.omit_token_scope = True
+        self.now += 900
+        self.assertEqual(self.creds.token(login=True)["scope"], explicit)
+        self.assertEqual(
+            sum(r[1] == "/oauth/authorize" for r in self.fixture.requests), 1
+        )
+
+    def test_download_permission_changes_do_not_require_new_authorization(self):
+        self.fixture.download_allowed = False
+        self.fixture.resource_handler = lambda *args: {
+            "share_id": "share-one",
+            "agent_app_id": "app-one",
+            "snapshot_id": "snapshot-one",
+            "sha256": "fixture",
+        }
+
+        def package(_desc, path):
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("skillpack.json", '{"name":"Scope fixture"}')
+
+        with patch("frevana_runner.packs.download", side_effect=package) as download:
+            with self.assertRaises(ApiError) as denied:
+                prepare(self.creds, "fixture")
+            self.assertEqual(denied.exception.status, 403)
+            saved = self.creds._read()
+            self.assertEqual(saved["scope"], "agent_app_external_run")
+            self.assertTrue(saved["grant_id"])
+            download.assert_not_called()
+            self.fixture.download_allowed = True
+            first = prepare(self.creds, "fixture")
+            self.assertEqual(prepare(self.creds, "fixture"), first)
+            self.fixture.download_allowed = False
+            with self.assertRaises(ApiError) as revoked:
+                prepare(self.creds, "fixture")
+            self.assertEqual(revoked.exception.status, 403)
+            self.assertFalse(list(self.creds.root.glob("grants/*/shares/fixture.json")))
+            self.fixture.download_allowed = True
+            self.assertEqual(prepare(self.creds, "fixture"), first)
+            self.assertEqual(self.creds._read(), saved)
+            download.assert_called_once()
+        self.assertEqual(
+            sum(r[1] == "/oauth/authorize" for r in self.fixture.requests), 1
+        )
+
     def test_independent_processes_share_one_rotating_refresh(self):
         first = self.creds.token(login=True)
         vault = Path(self.temp.name) / "test-vault.json"
@@ -403,10 +499,14 @@ print(json.dumps(creds.token()))
             )
         self.assertFalse(self.creds._read())
 
-    def test_preflight_refuses_missing_download_before_registration(self):
-        self.fixture.scopes = []
-        with self.assertRaisesRegex(RunnerError, "downloads are not enabled"):
-            self.creds.token(login=True)
+    def test_preflight_refuses_unavailable_scenario_before_registration(self):
+        for scopes in ([], ["other_scenario"], ["api." + "a" * 64]):
+            self.fixture.scopes_supported = scopes
+            with self.subTest(scopes=scopes):
+                with self.assertRaisesRegex(
+                    RunnerError, "external running is not enabled"
+                ):
+                    self.creds.token(login=True)
         self.assertFalse(self.fixture.clients)
         with (
             patch(
@@ -416,6 +516,30 @@ print(json.dumps(creds.token()))
             self.assertRaisesRegex(RunnerError, "not enabled"),
         ):
             check_resource("https://api.frevana.com")
+
+    def test_resource_metadata_rejects_wrong_environment_and_invalid_scopes(self):
+        metadata = {
+            "resource": self.fixture.api + RESOURCE_PATH,
+            "authorization_servers": [self.fixture.api],
+            "scopes_supported": ["agent_app_external_run"],
+        }
+        for changes in (
+            {"resource": "https://wrong.test" + RESOURCE_PATH},
+            {"authorization_servers": ["https://wrong.test"]},
+            {"scopes_supported": None},
+            {"scopes_supported": "agent_app_external_run"},
+            {"scopes_supported": {"agent_app_external_run": True}},
+            {"scopes_supported": [None]},
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch(
+                    "frevana_runner.auth.request_json",
+                    return_value={**metadata, **changes},
+                ),
+                self.assertRaisesRegex(RunnerError, "metadata"),
+            ):
+                check_resource(self.fixture.api)
 
     def test_revoked_refresh_clears_tokens_without_starting_new_login(self):
         first = self.creds.token(login=True)
@@ -453,11 +577,21 @@ print(json.dumps(creds.token()))
             {"token_type": "DPoP"},
             {"expires_in": 0},
             {"grant_id": "other"},
+            {"scope": None},
+            {"scope": []},
+            {"scope": {}},
+            {"scope": True},
         ):
             pair = {**first, "expires_in": 900, "token_type": "Bearer", **changes}
             with self.assertRaises(RunnerError):
                 self.creds._save(pair, first["client_id"], previous=first)
             self.assertEqual(self.creds._read(), first)
+
+    def test_explicit_empty_scope_is_preserved(self):
+        self.fixture.token_scope = ""
+        first = self.creds.token(login=True)
+        self.assertEqual(first["scope"], "")
+        self.assertEqual(self.creds.token(login=True), first)
 
     def test_environment_isolation_and_explicit_conflicts(self):
         for host, env in [

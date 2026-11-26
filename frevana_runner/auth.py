@@ -19,9 +19,7 @@ from filelock import FileLock
 CLIENT = "frevana-agent-app-runner"
 VAULT = CLIENT + ".oauth"
 RESOURCE_PATH = "/agent-app-external-run"
-DOWNLOAD_SCOPE = (
-    "api." + hashlib.sha256(b"POST /agent-app-shares/:share_code/download").hexdigest()
-)
+SCENARIO_SCOPE = "agent_app_external_run"
 ORIGINS = {
     "production": "https://api.frevana.com",
     "development": "https://api-dev.frevana.com",
@@ -126,10 +124,15 @@ def check_resource(api):
         raise RunnerError(
             "Agent App resource metadata does not match this environment."
         )
-    if DOWNLOAD_SCOPE not in data.get("scopes_supported", []):
+    scopes = data.get("scopes_supported")
+    if not isinstance(scopes, list) or any(not isinstance(s, str) for s in scopes):
         raise RunnerError(
-            f"Agent App downloads are not enabled at {api}. Ask an administrator to add "
-            "POST /agent-app-shares/:share_code/download to agent_app_external_run."
+            "Agent App resource metadata has invalid scopes_supported."
+        )
+    if SCENARIO_SCOPE not in scopes:
+        raise RunnerError(
+            f"Agent App external running is not enabled at {api}. "
+            "Ask an administrator to enable agent_app_external_run."
         )
 
 
@@ -264,13 +267,6 @@ class Credentials:
                 raise RunnerError(
                     "Runner authorization changed. Prepare the App again."
                 )
-            # A newly assigned download operation needs fresh consent, not just a refresh.
-            if (
-                login
-                and saved.get("grant_id")
-                and DOWNLOAD_SCOPE not in saved.get("scope", "").split()
-            ):
-                saved = self._write({"client_id": saved["client_id"]})
             if saved.get("access_token") and saved["expires_at"] > self.clock() + 45:
                 return saved
             if saved.get("refresh_token"):
@@ -336,15 +332,18 @@ class Credentials:
             raise RunnerError(
                 "OAuth refresh changed the authorization. Prepare the App again."
             )
+        scope = pair.get(
+            "scope", previous.get("scope", SCENARIO_SCOPE) if previous else SCENARIO_SCOPE
+        )
+        if not isinstance(scope, str):
+            raise RunnerError("OAuth returned an invalid scope.")
         saved = {
             "client_id": client_id,
             "access_token": pair["access_token"],
             "refresh_token": pair["refresh_token"],
             "expires_at": self.clock() + int(pair["expires_in"]),
             "grant_id": pair["grant_id"],
-            "scope": pair.get(
-                "scope", previous.get("scope", "") if previous else DOWNLOAD_SCOPE
-            ),
+            "scope": scope,
         }
         return self._write(saved)
 
