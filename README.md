@@ -29,6 +29,6 @@ Each environment has its own registration, credentials and cached results. Exist
 
 ## Deployment prerequisites
 
-Enable the `agent_app_external_run` scenario and assign `POST /agent-app-shares/:share_code/download` through the existing OAuth scenario admin page, along with the business operations required by the package. The Runner checks the public resource metadata before asking the user to authorize. Newly assigned operations require new consent. Publish this Runner version before enabling `NEXT_PUBLIC_AGENT_APP_RUNNER_ENABLED=true` in the Web build, independently for each environment.
+Enable the `agent_app_external_run` scenario and assign `POST /agent-app-shares/:share_code/download` through the existing OAuth scenario admin page, along with the business operations required by the package. Before asking the user to authorize, the Runner checks that the public resource metadata advertises the `agent_app_external_run` scope. The server checks current download and business permissions on each request; adding an operation does not require new consent. Existing credentials, including older route-hash scopes, are reused and renewed without changing their grant or cache. A download rejected with HTTP 403 leaves the authorization intact so it can be reused after access is restored. Publish this Runner version before enabling `NEXT_PUBLIC_AGENT_APP_RUNNER_ENABLED=true` in the Web build, independently for each environment.
 
 Publish the updated `SKILL.md` task guidance before releasing the simplified Web copy prompt.
