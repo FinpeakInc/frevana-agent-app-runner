@@ -5,6 +5,8 @@ description: Prepare a Frevana Agent App share link and run its packaged jobs in
 
 # Run a Frevana Agent App
 
+If this chat cannot run commands on the user's computer (for example, a web chat with only a hosted sandbox), stop before installation. In the user's language, ask them to paste the same prompt into a desktop session with local command access, such as ChatGPT Desktop or Claude Code on desktop. Do not ask them to paste this guide or upload App files.
+
 ## Install or reuse the runner
 
 Use Python 3.10 or newer on the user's computer. Keep the runner in a user-owned virtual environment at `~/.frevana/agent-app-runner/venvs/0.1.0` (under the user's home directory on Windows too). If this environment already has `frevana-agent-app-runner` version `0.1.0` and its CLI works, reuse it. Otherwise create the environment if needed and install the pinned package from PyPI. The wheel supplies the CLI and its Python modules.
