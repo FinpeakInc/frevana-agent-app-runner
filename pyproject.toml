@@ -5,6 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "frevana-agent-app-runner"
 version = "0.1.0"
+description = "Run shared Frevana Agent Apps in a local AI agent."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["filelock>=3.13,<4", "keyring>=25,<26"]
 
